@@ -2,6 +2,27 @@ package com.kaori.androdex.data
 
 enum class RootKind { SAF, PATH }
 
+enum class ThemeMode {
+    SYSTEM, LIGHT, DARK;
+
+    companion object {
+        fun fromStoredValue(value: String?): ThemeMode = entries.firstOrNull { it.name == value } ?: SYSTEM
+    }
+}
+
+fun ThemeMode.isDark(systemIsDark: Boolean): Boolean = when (this) {
+    ThemeMode.SYSTEM -> systemIsDark
+    ThemeMode.LIGHT -> false
+    ThemeMode.DARK -> true
+}
+
+object NetworkTimeoutDefaults {
+    const val REQUEST_SECONDS = 120
+    const val CONNECT_SECONDS = 20
+    const val MIN_REQUEST_SECONDS = 10
+    const val MAX_REQUEST_SECONDS = 120
+}
+
 data class AuthorizedRoot(
     val id: String,
     val kind: RootKind,
@@ -15,10 +36,11 @@ data class AuthorizedRoot(
 data class UserSettings(
     val pluginName: String = "Androdex",
     val tunnelId: String = "",
-    val networkTimeoutSeconds: Int = 30,
+    val networkTimeoutSeconds: Int = NetworkTimeoutDefaults.REQUEST_SECONDS,
     val autoReconnect: Boolean = true,
-    val maxReadBytes: Long = 5L * 1024 * 1024,
-    val maxOutputChars: Int = 65_536,
+    val maxReadBytes: Long = 64L * 1024 * 1024,
+    val maxReadChars: Int = 10_000_000,
+    val maxOutputChars: Int = 262_144,
     val debugLogging: Boolean = false,
     val autoStart: Boolean = false,
 )

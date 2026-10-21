@@ -27,22 +27,26 @@ class DocumentParser {
         maxFileBytes: Long,
         startOffset: Int,
         maxChars: Int,
+        maxTotalChars: Int = DEFAULT_MAX_EXTRACTED_CHARS,
     ): ParsedDocument {
         require(startOffset >= 0) { "start_offset 不能为负数" }
         require(maxChars in 1..262_144) { "max_chars 必须在 1 到 262144 之间" }
+        require(maxTotalChars in 1..20_000_000) { "单文件累计字符上限无效" }
         val extension = name.substringAfterLast('.', "").lowercase()
         val extracted = when (extension) {
-            "pdf" -> parsePdf(input, maxFileBytes)
-            "docx" -> parseDocx(input, maxFileBytes)
-            "xlsx" -> parseXlsx(input, maxFileBytes)
-            "pptx" -> parsePptx(input, maxFileBytes)
+            "pdf" -> parsePdf(input, maxFileBytes, maxTotalChars)
+            "docx" -> parseDocx(input, maxFileBytes, maxTotalChars)
+            "xlsx" -> parseXlsx(input, maxFileBytes, maxTotalChars)
+            "pptx" -> parsePptx(input, maxFileBytes, maxTotalChars)
             else -> throw UnsupportedDocumentException("不支持解析 .$extension 文档")
         }
-        val start = startOffset.coerceAtMost(extracted.text.length)
-        val end = minOf(extracted.text.length, start + maxChars)
-        val page = extracted.text.substring(start, end)
+        var start = startOffset.coerceAtMost(extracted.text.length)
+        if (start < extracted.text.length && Character.isLowSurrogate(extracted.text[start])) start++
+        var end = minOf(extracted.text.length, start + maxChars)
+        if (end < extracted.text.length && end > start && Character.isHighSurrogate(extracted.text[end - 1]) && Character.isLowSurrogate(extracted.text[end])) end--
+        val page = safeSubstring(extracted.text, start, end)
         val moreInBuffer = end < extracted.text.length
-        val next = if (moreInBuffer || extracted.parserTruncated) end.takeIf { it > start } else null
+        val next = if (moreInBuffer) end.takeIf { it > start } else null
         return ParsedDocument(
             text = page,
             nextOffset = next,
@@ -52,7 +56,7 @@ class DocumentParser {
         )
     }
 
-    private fun parsePdf(input: InputStream, maxBytes: Long): Extraction {
+    private fun parsePdf(input: InputStream, maxBytes: Long, maxChars: Int): Extraction {
         val bounded = readBounded(input, maxBytes)
         return try {
             PDDocument.load(ByteArrayInputStream(bounded)).use { document ->
@@ -64,8 +68,8 @@ class DocumentParser {
                     stripper.endPage = page
                     val pageText = stripper.getText(document)
                     val section = "[PDF 第 ${page} 页]\n$pageText\n"
-                    if (output.length + section.length > MAX_EXTRACTED_CHARS) {
-                        output.append(section.take(MAX_EXTRACTED_CHARS - output.length))
+                    if (output.length + section.length > maxChars) {
+                        output.append(safeTake(section, maxChars - output.length))
                         truncated = true
                         break
                     }
@@ -78,7 +82,7 @@ class DocumentParser {
         }
     }
 
-    private fun parseDocx(input: InputStream, maxBytes: Long): Extraction {
+    private fun parseDocx(input: InputStream, maxBytes: Long, maxChars: Int): Extraction {
         val entries = openXmlEntries(input, maxBytes)
         val body = entries["word/document.xml"] ?: throw DocumentParseException("DOCX 缺少 word/document.xml")
         val parser = xml(body)
@@ -91,19 +95,19 @@ class DocumentParser {
                 XmlPullParser.START_TAG -> when (parser.name) {
                     "p" -> paragraphOpen = true
                     "t" -> inText = true
-                    "tab" -> if (result.length < MAX_EXTRACTED_CHARS) result.append('\t')
-                    "br" -> if (result.length < MAX_EXTRACTED_CHARS) result.append('\n')
+                    "tab" -> if (result.length < maxChars) result.append('\t')
+                    "br" -> if (result.length < maxChars) result.append('\n')
                 }
-                XmlPullParser.TEXT -> if (inText && result.length < MAX_EXTRACTED_CHARS) result.append(parser.text)
+                XmlPullParser.TEXT -> if (inText && result.length < maxChars) result.append(safeTake(parser.text, maxChars - result.length))
                 XmlPullParser.END_TAG -> when (parser.name) {
                     "t" -> inText = false
                     "p" -> if (paragraphOpen) {
-                        if (result.length >= MAX_EXTRACTED_CHARS) truncated = true else result.append('\n')
+                        if (result.length >= maxChars) truncated = true else result.append('\n')
                         paragraphOpen = false
                     }
                 }
             }
-            if (result.length >= MAX_EXTRACTED_CHARS) {
+            if (result.length >= maxChars) {
                 truncated = parser.eventType != XmlPullParser.END_DOCUMENT
                 break
             }
@@ -112,7 +116,7 @@ class DocumentParser {
         return Extraction(result.toString(), truncated)
     }
 
-    private fun parseXlsx(input: InputStream, maxBytes: Long): Extraction {
+    private fun parseXlsx(input: InputStream, maxBytes: Long, maxChars: Int): Extraction {
         val entries = openXmlEntries(input, maxBytes)
         val workbook = entries["xl/workbook.xml"] ?: throw DocumentParseException("XLSX 缺少 xl/workbook.xml")
         val sheetNames = mutableListOf<String>()
@@ -129,7 +133,7 @@ class DocumentParser {
         val output = StringBuilder()
         var truncated = false
         sheetEntries.forEachIndexed { index, entryName ->
-            if (output.length >= MAX_EXTRACTED_CHARS) return@forEachIndexed
+            if (output.length >= maxChars) return@forEachIndexed
             val sheetName = sheetNames.getOrNull(index) ?: "工作表 ${index + 1}"
             output.append("[工作表：").append(sheetName).append("]\n")
             val parser = xml(entries.getValue(entryName))
@@ -138,7 +142,7 @@ class DocumentParser {
             var value = ""
             var inValue = false
             var row = 0
-            while (parser.eventType != XmlPullParser.END_DOCUMENT && output.length < MAX_EXTRACTED_CHARS) {
+            while (parser.eventType != XmlPullParser.END_DOCUMENT && output.length < maxChars) {
                 when (parser.eventType) {
                     XmlPullParser.START_TAG -> when (parser.name) {
                         "row" -> row = parser.getAttributeValue(null, "r")?.toIntOrNull() ?: row + 1
@@ -153,7 +157,10 @@ class DocumentParser {
                         "v", "t" -> inValue = false
                         "c" -> {
                             val rendered = if (cellType == "s") sharedStrings.getOrNull(value.toIntOrNull() ?: -1) ?: value else value
-                            if (rendered.isNotEmpty()) output.append("第 ").append(row).append(" 行，").append(cellRef).append("：").append(rendered).append('\n')
+                            if (rendered.isNotEmpty()) {
+                                val cellText = "第 $row 行，$cellRef：$rendered\n"
+                                output.append(safeTake(cellText, maxChars - output.length))
+                            }
                             cellRef = ""
                             cellType = ""
                             value = ""
@@ -162,29 +169,29 @@ class DocumentParser {
                 }
                 parser.next()
             }
-            if (output.length >= MAX_EXTRACTED_CHARS) truncated = true
+            if (output.length >= maxChars) truncated = true
         }
-        return Extraction(output.take(MAX_EXTRACTED_CHARS).toString(), truncated)
+        return Extraction(output.take(maxChars).toString(), truncated)
     }
 
-    private fun parsePptx(input: InputStream, maxBytes: Long): Extraction {
+    private fun parsePptx(input: InputStream, maxBytes: Long, maxChars: Int): Extraction {
         val entries = openXmlEntries(input, maxBytes)
         val slideEntries = entries.keys.filter { it.matches(Regex("ppt/slides/slide\\d+\\.xml")) }
             .sortedBy { it.substringAfter("slide").substringBefore('.').toIntOrNull() ?: Int.MAX_VALUE }
         val result = StringBuilder()
         var truncated = false
         for ((index, entry) in slideEntries.withIndex()) {
-            if (result.length >= MAX_EXTRACTED_CHARS) {
+            if (result.length >= maxChars) {
                 truncated = true
                 break
             }
             result.append("[幻灯片 ${index + 1}]\n")
             val parser = xml(entries.getValue(entry))
             var inText = false
-            while (parser.eventType != XmlPullParser.END_DOCUMENT && result.length < MAX_EXTRACTED_CHARS) {
+            while (parser.eventType != XmlPullParser.END_DOCUMENT && result.length < maxChars) {
                 when (parser.eventType) {
                     XmlPullParser.START_TAG -> if (parser.name == "t") inText = true
-                    XmlPullParser.TEXT -> if (inText) result.append(parser.text)
+                    XmlPullParser.TEXT -> if (inText) result.append(safeTake(parser.text, maxChars - result.length))
                     XmlPullParser.END_TAG -> if (parser.name == "t") {
                         inText = false
                         result.append('\n')
@@ -192,9 +199,9 @@ class DocumentParser {
                 }
                 parser.next()
             }
-            if (result.length >= MAX_EXTRACTED_CHARS) truncated = true
+            if (result.length >= maxChars) truncated = true
         }
-        return Extraction(result.take(MAX_EXTRACTED_CHARS).toString(), truncated)
+        return Extraction(result.take(maxChars).toString(), truncated)
     }
 
     private fun parseSharedStrings(xmlBytes: ByteArray): List<String> {
@@ -272,7 +279,8 @@ class DocumentParser {
     }
 
     private fun readBounded(input: InputStream, maximum: Long): ByteArray {
-        if (maximum <= 0 || maximum > 16L * 1024 * 1024) throw FileReadLimitException("PDF 读取上限无效")
+        val allowed = minOf(maximum, MAX_PDF_BYTES)
+        if (allowed <= 0) throw FileReadLimitException("PDF 读取上限无效")
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(8_192)
         var countTotal = 0L
@@ -281,7 +289,7 @@ class DocumentParser {
                 val count = it.read(buffer)
                 if (count < 0) break
                 countTotal += count
-                if (countTotal > maximum) throw FileReadLimitException("PDF 超过当前文件大小上限")
+                if (countTotal > allowed) throw FileReadLimitException("PDF 超过 PDF 解析器的 32 MiB 内存安全上限")
                 output.write(buffer, 0, count)
             }
         }
@@ -314,10 +322,26 @@ class DocumentParser {
 
     private data class Extraction(val text: String, val parserTruncated: Boolean)
 
+    private fun safeTake(value: String, maxChars: Int): String {
+        if (maxChars <= 0) return ""
+        var end = minOf(value.length, maxChars)
+        if (end < value.length && end > 0 && Character.isHighSurrogate(value[end - 1]) && Character.isLowSurrogate(value[end])) end--
+        return value.substring(0, end)
+    }
+
+    private fun safeSubstring(value: String, requestedStart: Int, requestedEnd: Int): String {
+        var start = requestedStart.coerceIn(0, value.length)
+        var end = requestedEnd.coerceIn(start, value.length)
+        if (start < value.length && Character.isLowSurrogate(value[start])) start++
+        if (end < value.length && end > start && Character.isHighSurrogate(value[end - 1]) && Character.isLowSurrogate(value[end])) end--
+        return value.substring(start, end)
+    }
+
     companion object {
-        private const val MAX_EXTRACTED_CHARS = 1_000_000
+        private const val DEFAULT_MAX_EXTRACTED_CHARS = 2_000_000
         private const val MAX_UNCOMPRESSED_BYTES = 32L * 1024 * 1024
         private const val MAX_ENTRY_BYTES = 12L * 1024 * 1024
+        private const val MAX_PDF_BYTES = 32L * 1024 * 1024
     }
 }
 

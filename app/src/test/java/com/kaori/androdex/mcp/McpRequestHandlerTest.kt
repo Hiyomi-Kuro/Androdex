@@ -76,6 +76,33 @@ class McpRequestHandlerTest {
         assertTrue(output.structured.toString().length + output.text.length < 4_096)
     }
 
+    @Test fun readTextSchemaAcceptsCompatibleLineAndUnicodeOffsetPaging() {
+        val definition = McpToolRegistry().find("read_text")!!
+        val lineRequest = JsonObject().apply { addProperty("root_id", "root"); addProperty("path", "app/Main.kt"); addProperty("start_line", 3) }
+        val offsetRequest = JsonObject().apply { addProperty("root_id", "root"); addProperty("path", "app/Main.kt"); addProperty("offset", 120L); addProperty("limit", 32_768) }
+        assertTrue(McpToolRegistry().validate(definition.name, lineRequest) == null)
+        assertTrue(McpToolRegistry().validate(definition.name, offsetRequest) == null)
+        offsetRequest.addProperty("offset", -1)
+        assertTrue(McpToolRegistry().validate(definition.name, offsetRequest)?.contains("不能小于") == true)
+    }
+
+    @Test fun oversizedOffsetReadSuggestsRetryAtSameCursor() {
+        val args = JsonObject().apply {
+            addProperty("root_id", "root")
+            addProperty("path", "app/Main.kt")
+            addProperty("offset", 12_345L)
+            addProperty("limit", 262_144)
+        }
+        val output = McpResponseLimiter { 4_096 }.limit(
+            "read_text",
+            args,
+            McpToolOutput(JsonObject().apply { addProperty("text", "x".repeat(8_000)) }, "读取文本"),
+        )
+        val retry = output.structured.getAsJsonObject("retry_with")
+        assertEquals(12_345L, retry.get("offset").asLong)
+        assertTrue(retry.get("limit").asInt < args.get("limit").asInt)
+    }
+
     private fun request(id: Int, method: String) = JsonObject().apply {
         addProperty("jsonrpc", "2.0")
         addProperty("id", id)

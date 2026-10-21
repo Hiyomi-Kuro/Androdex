@@ -13,8 +13,10 @@ import com.kaori.androdex.data.ActivityLogEntry
 import com.kaori.androdex.data.AuthorizedRoot
 import com.kaori.androdex.data.RootKind
 import com.kaori.androdex.data.TunnelConnectionState
+import com.kaori.androdex.data.ThemeMode
 import com.kaori.androdex.data.UserSettings
 import com.kaori.androdex.files.FileAccessException
+import com.kaori.androdex.files.PathCopyLocation
 import com.kaori.androdex.mcp.McpRequestHandler
 import com.kaori.androdex.service.ConnectionService
 import kotlinx.coroutines.Dispatchers
@@ -30,10 +32,13 @@ data class BrowserEntry(val name: String, val path: String, val directory: Boole
 
 data class MainUiState(
     val settings: UserSettings = UserSettings(),
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val roots: List<RootUiItem> = emptyList(),
     val serviceState: TunnelConnectionState = TunnelConnectionState.STOPPED,
     val serviceActive: Boolean = false,
     val allFilesAccess: Boolean = false,
+    val batteryOptimizationAllowed: Boolean = false,
+    val notificationsAllowed: Boolean = false,
     val apiKeyConfigured: Boolean = false,
     val mcpBearerConfigured: Boolean = false,
     val statsFilesRead: Long = 0,
@@ -81,10 +86,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update {
             it.copy(
                 settings = graph.settings.settings(),
+                themeMode = graph.settings.themeMode(),
                 roots = roots,
                 serviceState = serviceState,
                 serviceActive = graph.connectionManager.isServiceActive(),
                 allFilesAccess = graph.permissionManager.hasAllFilesAccess(),
+                batteryOptimizationAllowed = graph.permissionManager.isIgnoringBatteryOptimizations(),
+                notificationsAllowed = graph.permissionManager.hasNotificationPermission(),
                 apiKeyConfigured = graph.credentials.hasRuntimeApiKey(),
                 mcpBearerConfigured = graph.credentials.hasMcpBearer(),
                 statsFilesRead = runtime.filesRead,
@@ -93,6 +101,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 logs = graph.diagnostics.entries.value,
             )
         }
+    }
+
+    fun setThemeMode(value: ThemeMode) {
+        graph.settings.saveThemeMode(value)
+        mutableState.update { it.copy(themeMode = value) }
     }
 
     fun saveSettings(value: UserSettings) {
@@ -271,6 +284,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun copyLocation(rootId: String, path: String, onReady: (PathCopyLocation) -> Unit) {
+        viewModelScope.launch {
+            val location = withContext(Dispatchers.IO) {
+                runCatching { graph.fileAccessManager.copyLocation(rootId, path) }
+                    .getOrElse { PathCopyLocation(absolutePath = null) }
+            }
+            onReady(location)
+        }
+    }
+
     fun preview(rootId: String, path: String, document: Boolean) {
         viewModelScope.launch {
             mutableState.update { it.copy(busy = true) }
@@ -318,6 +341,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             getApplication<Application>().startActivity(intent)
         }.onFailure {
             showMessage("无法打开系统存储权限页面：${it.message ?: it.javaClass.simpleName}")
+        }
+    }
+
+    fun requestBatteryOptimizationExemption() {
+        if (graph.permissionManager.isIgnoringBatteryOptimizations()) {
+            showMessage("Androdex 已排除电池优化。该状态不能保证系统永不停止应用。")
+            return
+        }
+        launchSystemSettings(
+            graph.permissionManager.requestBatteryOptimizationExemptionIntent(),
+            fallback = graph.permissionManager.batteryOptimizationSettingsIntent(),
+            error = "无法打开电池优化请求页面",
+        )
+    }
+
+    fun openBatteryOptimizationSettings() = launchSystemSettings(
+        graph.permissionManager.batteryOptimizationSettingsIntent(),
+        fallback = graph.permissionManager.appDetailsSettingsIntent(),
+        error = "无法打开系统电池优化设置",
+    )
+
+    fun openAppBatterySettings() = launchSystemSettings(
+        graph.permissionManager.appDetailsSettingsIntent(),
+        error = "无法打开 Androdex 应用详情页",
+    )
+
+    fun openAppNotificationSettings() = launchSystemSettings(
+        graph.permissionManager.appNotificationSettingsIntent(),
+        fallback = graph.permissionManager.appDetailsSettingsIntent(),
+        error = "无法打开 Androdex 通知设置",
+    )
+
+    private fun launchSystemSettings(intent: Intent, fallback: Intent? = null, error: String) {
+        val appContext = getApplication<Application>()
+        val result = runCatching {
+            appContext.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        if (result.isFailure && fallback != null) {
+            runCatching { appContext.startActivity(fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                .onFailure { showMessage("$error：${it.message ?: it.javaClass.simpleName}") }
+        } else if (result.isFailure) {
+            showMessage("$error：${result.exceptionOrNull()?.message ?: "系统未提供此页面"}")
         }
     }
 }

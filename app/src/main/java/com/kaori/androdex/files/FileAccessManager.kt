@@ -9,6 +9,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.kaori.androdex.core.FileContentReader
 import com.kaori.androdex.core.FileReadLimitException
+import com.kaori.androdex.core.AbsolutePathResolver
 import com.kaori.androdex.core.PathNormalizer
 import com.kaori.androdex.core.ReadAccessPolicy
 import com.kaori.androdex.data.AuthorizedRoot
@@ -30,6 +31,27 @@ class FileAccessManager(
     private val diagnostics: DiagnosticsManager,
     private val documentParser: DocumentParser = DocumentParser(),
 ) : McpToolExecutor {
+    fun copyLocation(rootId: String, relativePath: String): PathCopyLocation {
+        val entry = resolve(rootId, relativePath)
+        if (entry.root.kind == RootKind.PATH) {
+            val absolute = AbsolutePathResolver.fromPathRoot(entry.root.filePath.orEmpty(), entry.relativePath)
+            return PathCopyLocation(absolutePath = absolute)
+        }
+
+        val rootUri = Uri.parse(entry.root.uriString ?: throw FileAccessException("SAF 目录授权信息不完整"))
+        val documentUri = entry.document?.uri ?: rootUri
+        val absolute = runCatching {
+            AbsolutePathResolver.fromPrimarySafDocumentIds(
+                authority = documentUri.authority,
+                rootDocumentId = DocumentsContract.getTreeDocumentId(rootUri),
+                documentId = if (entry.relativePath.isEmpty()) DocumentsContract.getTreeDocumentId(rootUri)
+                else DocumentsContract.getDocumentId(documentUri),
+                relativePath = entry.relativePath,
+            )
+        }.getOrNull()
+        return PathCopyLocation(absolutePath = absolute, safUri = documentUri.toString())
+    }
+
     override fun execute(name: String, arguments: JsonObject): McpToolOutput = try {
         when (name) {
             "list_roots" -> listRoots()
@@ -237,12 +259,47 @@ class FileAccessManager(
         val entry = resolve(rootId, path)
         requireReadableFile(entry)
         if (!FileContentReader.isSupportedText(entry.name)) throw FileAccessException("该格式不是可直接读取的文本文件，请使用 read_document 或查看格式限制")
+        val currentSettings = settings.settings()
+        val outputLimit = minOf(optionalInt(args, "max_chars") ?: currentSettings.maxOutputChars, currentSettings.maxOutputChars)
+        val started = System.nanoTime()
+        val useCharacterPaging = args.has("offset") || args.has("limit") || (!args.has("start_line") && !args.has("line_count"))
+        if (useCharacterPaging) {
+            val offset = optionalLong(args, "offset") ?: 0L
+            val limit = minOf(optionalInt(args, "limit") ?: outputLimit, currentSettings.maxReadChars)
+            val page = openStream(entry).use {
+                FileContentReader.readCodePointPage(it, offset, limit, outputLimit, currentSettings.maxReadChars, currentSettings.maxReadBytes)
+            }
+            val duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            settings.recordSuccessfulRead()
+            diagnostics.log("读取成功", "按字符偏移读取文本 ${safeDisplay(rootId, path)}，偏移 $offset", duration, page.nextOffset - offset)
+            val result = JsonObject().apply {
+                addProperty("root_id", rootId)
+                addProperty("path", entry.relativePath)
+                addProperty("offset", page.offset)
+                addProperty("next_offset", page.nextOffset)
+                addProperty("has_more", page.hasMore)
+                addProperty("start_line", page.startLine)
+                addProperty("end_line", page.endLine)
+                if (page.hasMore) {
+                    addProperty("next_start_line", if (page.text.endsWith('\n')) page.endLine + 1 else page.endLine)
+                } else add("next_start_line", com.google.gson.JsonNull.INSTANCE)
+                addProperty("characters_returned", page.nextOffset - offset)
+                addProperty("text", page.text)
+                addProperty("file_limit_reached", page.fileLimitReached)
+                addProperty("truncated", page.hasMore || page.fileLimitReached)
+            }
+            val suffix = when {
+                page.hasMore -> "下一页从字符偏移 ${page.nextOffset} 开始。"
+                page.fileLimitReached -> "已达到单文件累计读取字符上限。"
+                else -> "已到文件末尾。"
+            }
+            return McpToolOutput(result, "读取 ${page.nextOffset - offset} 个字符，行号 ${page.startLine}–${page.endLine}。$suffix")
+        }
+
         val startLine = (optionalInt(args, "start_line") ?: 1).coerceAtLeast(1)
         val lineCount = (optionalInt(args, "line_count") ?: 200).coerceIn(1, 2_000)
-        val outputLimit = minOf(optionalInt(args, "max_chars") ?: settings.settings().maxOutputChars, settings.settings().maxOutputChars)
-        val started = System.nanoTime()
         val page = openStream(entry).use {
-            FileContentReader.readPage(it, startLine, lineCount, outputLimit, settings.settings().maxReadBytes)
+            FileContentReader.readPage(it, startLine, lineCount, outputLimit, currentSettings.maxReadBytes, currentSettings.maxReadChars)
         }
         val duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
         settings.recordSuccessfulRead()
@@ -255,9 +312,11 @@ class FileAccessManager(
             addProperty("text", page.text)
             addProperty("bytes_consumed", page.bytesConsumed)
             if (page.nextLine != null) addProperty("next_start_line", page.nextLine) else add("next_start_line", com.google.gson.JsonNull.INSTANCE)
-            addProperty("truncated", page.nextLine != null)
+            addProperty("has_more", page.nextLine != null)
+            addProperty("file_limit_reached", page.fileLimitReached)
+            addProperty("truncated", page.nextLine != null || page.fileLimitReached)
         }
-        return McpToolOutput(result, "读取 ${page.linesReturned} 行${page.nextLine?.let { "，下一页从第 $it 行开始" } ?: ""}。")
+        return McpToolOutput(result, "读取 ${page.linesReturned} 行${page.nextLine?.let { "，下一页从第 $it 行开始" } ?: if (page.fileLimitReached) "，已达到单文件累计读取字符上限" else ""}。")
     }
 
     private fun readDocument(args: JsonObject): McpToolOutput {
@@ -266,10 +325,11 @@ class FileAccessManager(
         val entry = resolve(rootId, path)
         requireReadableFile(entry)
         if (entry.extension !in DOCUMENT_EXTENSIONS) throw FileAccessException("read_document 仅支持 PDF、DOCX、XLSX、PPTX")
-        val maxChars = minOf(optionalInt(args, "max_chars") ?: settings.settings().maxOutputChars, settings.settings().maxOutputChars)
+        val currentSettings = settings.settings()
+        val maxChars = minOf(optionalInt(args, "max_chars") ?: currentSettings.maxOutputChars, currentSettings.maxOutputChars)
         val startOffset = (optionalInt(args, "start_offset") ?: 0).coerceAtLeast(0)
         val started = System.nanoTime()
-        val parsed = openStream(entry).use { documentParser.parse(entry.name, it, settings.settings().maxReadBytes, startOffset, maxChars) }
+        val parsed = openStream(entry).use { documentParser.parse(entry.name, it, currentSettings.maxReadBytes, startOffset, maxChars, currentSettings.maxReadChars) }
         val duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
         settings.recordSuccessfulRead()
         diagnostics.log("读取成功", "解析 ${parsed.format} 文档 ${safeDisplay(rootId, path)}", duration, entry.size)
@@ -281,6 +341,7 @@ class FileAccessManager(
             addProperty("start_offset", startOffset)
             addProperty("extracted_chars", parsed.totalExtractedChars)
             if (parsed.nextOffset != null) addProperty("next_offset", parsed.nextOffset) else add("next_offset", com.google.gson.JsonNull.INSTANCE)
+            addProperty("has_more", parsed.nextOffset != null)
             addProperty("parser_truncated", parsed.parserTruncated)
         }
         return McpToolOutput(result, "${parsed.format} 文档文本已提取 ${parsed.text.length} 个字符。${if (parsed.parserTruncated) " 文档超过解析器文本上限。" else ""}")
@@ -293,18 +354,20 @@ class FileAccessManager(
         requireReadableFile(entry)
         if (!FileContentReader.isSupportedText(entry.name)) throw FileAccessException("分块读取只允许可安全呈现的文本文件；图片及二进制文件不会返回正文")
         val offset = optionalLong(args, "offset") ?: 0L
-        val length = (optionalInt(args, "length") ?: 32_768).coerceIn(1, 131_072)
+        val length = (optionalInt(args, "length") ?: optionalInt(args, "limit") ?: 32_768).coerceIn(1, 131_072)
+        val byteBudget = minOf(settings.settings().maxReadBytes, settings.settings().maxReadChars.toLong())
         val started = System.nanoTime()
-        val chunk = openStream(entry).use { FileContentReader.readChunk(it, offset, length, settings.settings().maxReadBytes) }
+        val chunk = openStream(entry).use { FileContentReader.readChunk(it, offset, length, byteBudget) }
         val duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
         settings.recordSuccessfulRead()
         diagnostics.log("读取成功", "分块读取 ${safeDisplay(rootId, path)}，偏移 $offset", duration, chunk.nextOffset - offset)
         val result = JsonObject().apply {
             addProperty("root_id", rootId)
             addProperty("path", entry.relativePath)
-            addProperty("offset", offset)
+            addProperty("offset", chunk.offset)
             addProperty("next_offset", chunk.nextOffset)
             addProperty("has_more", chunk.hasMore)
+            addProperty("truncated", chunk.hasMore)
             addProperty("text", chunk.text)
         }
         return McpToolOutput(result, "已读取 ${chunk.nextOffset - offset} 字节${if (chunk.hasMore) "，后面还有内容" else "，文件片段已到末尾"}。")
@@ -532,3 +595,5 @@ class FileAccessManager(
 }
 
 class FileAccessException(message: String, val code: String = "file_access_error") : Exception(message)
+
+data class PathCopyLocation(val absolutePath: String?, val safUri: String? = null)

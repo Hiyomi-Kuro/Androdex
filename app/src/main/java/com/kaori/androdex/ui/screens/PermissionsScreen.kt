@@ -60,14 +60,6 @@ fun PermissionsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("只授权需要读取的目录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("MCP 工具始终受此目录列表限制。图片只显示名称与元数据，不读取图片正文。", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
-        item {
             Card {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("添加目录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -99,7 +91,7 @@ fun PermissionsScreen(
                         Icon(Icons.Filled.FolderOpen, contentDescription = null, tint = if (item.accessible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                         Column(Modifier.weight(1f).padding(start = 10.dp)) {
                             Text(item.root.name, fontWeight = FontWeight.SemiBold)
-                            Text(item.root.displayPath, style = MaterialTheme.typography.bodySmall)
+                            Text(item.root.displayPath, style = MaterialTheme.typography.bodySmall, softWrap = true)
                         }
                         Switch(checked = item.root.enabled, onCheckedChange = { onToggle(item.root.id, it) })
                         IconButton(onClick = { onRemove(item.root.id) }) { Icon(Icons.Filled.DeleteOutline, contentDescription = "删除目录授权") }

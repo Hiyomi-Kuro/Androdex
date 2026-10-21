@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.kaori.androdex.core.TunnelProtocol
 import com.kaori.androdex.data.DiagnosticsManager
+import com.kaori.androdex.data.NetworkTimeoutDefaults
 import com.kaori.androdex.data.SecureCredentialStore
 import com.kaori.androdex.data.SettingsRepository
 import com.kaori.androdex.mcp.McpRequestHandler
@@ -44,7 +45,7 @@ class TunnelClient(
     private val diagnostics: DiagnosticsManager,
 ) {
     private val baseClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(NetworkTimeoutDefaults.CONNECT_SECONDS.toLong(), TimeUnit.SECONDS)
         .readTimeout(50, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -62,7 +63,7 @@ class TunnelClient(
     fun testConfiguration(): String {
         val (tunnelId, _) = validateConfiguration()
         val request = controlRequest("/v1/tunnels/$tunnelId", method = "GET")
-        val response = execute(request, settings.settings().networkTimeoutSeconds)
+        val response = execute(request, TunnelTimeoutPolicy.ordinaryRequestSeconds(settings.settings().networkTimeoutSeconds))
         response.use {
             if (!it.isSuccessful) throw apiException(it.code, readErrorCode(it), "Tunnel 元数据检查失败")
             readBounded(it.body?.byteStream(), MAX_CONTROL_BODY_BYTES)
@@ -72,14 +73,14 @@ class TunnelClient(
 
     fun poll(): PollBatch {
         val (tunnelId, _) = validateConfiguration()
-        val pollTimeout = minOf(settings.settings().networkTimeoutSeconds, MAX_NETWORK_TIMEOUT_SECONDS)
+        val pollTimeout = TunnelTimeoutPolicy.ordinaryRequestSeconds(settings.settings().networkTimeoutSeconds)
         val url = controlUrl("/v1/tunnels/$tunnelId/poll")
             .newBuilder()
             .addQueryParameter("limit", "25")
             .addQueryParameter("timeout_ms", POLL_WAIT_MS.toString())
             .build()
         val request = controlRequest(url, "GET")
-        val response = execute(request, pollTimeout + POLL_WAIT_SECONDS + 10)
+        val response = execute(request, TunnelTimeoutPolicy.pollRequestSeconds(pollTimeout))
         val receivedAt = System.nanoTime()
         response.use {
             if (it.code == 204) return PollBatch(receivedAt, emptyList())
@@ -115,7 +116,7 @@ class TunnelClient(
             .header("X-Tunnel-Shard-Token", command.shardToken)
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        val result = execute(request, settings.settings().networkTimeoutSeconds, deadlineNanos)
+        val result = execute(request, TunnelTimeoutPolicy.ordinaryRequestSeconds(settings.settings().networkTimeoutSeconds), deadlineNanos)
         result.use {
             if (!it.isSuccessful && it.code != 204) throw apiException(it.code, readErrorCode(it), "Tunnel 响应提交失败")
             readBounded(it.body?.byteStream(), MAX_RESPONSE_BODY_BYTES)
@@ -187,14 +188,15 @@ class TunnelClient(
     private fun controlUrl(path: String) = (CONTROL_PLANE + path).toHttpUrl()
 
     private fun execute(request: Request, timeoutSeconds: Int, deadlineNanos: Long? = null): okhttp3.Response {
+        val requestTimeout = TunnelTimeoutPolicy.callTimeoutSeconds(timeoutSeconds).toLong()
         val client = baseClient.newBuilder()
-            .connectTimeout(timeoutSeconds.coerceIn(10, MAX_NETWORK_TIMEOUT_SECONDS).toLong(), TimeUnit.SECONDS)
-            .readTimeout((timeoutSeconds + 15).coerceAtMost(150).toLong(), TimeUnit.SECONDS)
-            .writeTimeout(timeoutSeconds.coerceIn(10, MAX_NETWORK_TIMEOUT_SECONDS).toLong(), TimeUnit.SECONDS)
+            .connectTimeout(NetworkTimeoutDefaults.CONNECT_SECONDS.toLong(), TimeUnit.SECONDS)
+            .readTimeout((requestTimeout + POLL_READ_GRACE_SECONDS).coerceAtMost(MAX_READ_TIMEOUT_SECONDS), TimeUnit.SECONDS)
+            .writeTimeout(requestTimeout.coerceAtMost(NetworkTimeoutDefaults.MAX_REQUEST_SECONDS.toLong()), TimeUnit.SECONDS)
             .build()
         return try {
             val call = client.newCall(request)
-            call.timeout().timeout(timeoutSeconds.coerceIn(10, MAX_NETWORK_TIMEOUT_SECONDS).toLong(), TimeUnit.SECONDS)
+            call.timeout().timeout(requestTimeout, TimeUnit.SECONDS)
             deadlineNanos?.let { call.timeout().deadlineNanoTime(it) }
             call.execute()
         } catch (e: IOException) {
@@ -247,11 +249,29 @@ class TunnelClient(
         private const val TUNNEL_WIRE_VERSION = "2026-08-25"
         private const val MCP_SERVER_INFO = "{\"version\":2,\"channels\":[{\"name\":\"main\",\"stateless\":true}]}"
         private const val POLL_WAIT_MS = 15_000
-        private const val POLL_WAIT_SECONDS = 15
-        private const val MAX_NETWORK_TIMEOUT_SECONDS = 120
+        private const val POLL_READ_GRACE_SECONDS = 15L
+        private const val MAX_READ_TIMEOUT_SECONDS = 160L
         private const val MAX_CONTROL_BODY_BYTES = 256L * 1024
         private const val MAX_POLL_BODY_BYTES = 2L * 1024 * 1024
         private const val MAX_RESPONSE_BODY_BYTES = 64L * 1024
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
+}
+
+internal object TunnelTimeoutPolicy {
+    private const val POLL_SERVER_WAIT_SECONDS = 15
+    private const val POLL_TRANSPORT_GRACE_SECONDS = 10
+
+    fun ordinaryRequestSeconds(configuredSeconds: Int): Int = configuredSeconds.coerceIn(
+        NetworkTimeoutDefaults.MIN_REQUEST_SECONDS,
+        NetworkTimeoutDefaults.MAX_REQUEST_SECONDS,
+    )
+
+    fun pollRequestSeconds(configuredSeconds: Int): Int = ordinaryRequestSeconds(configuredSeconds) +
+        POLL_SERVER_WAIT_SECONDS + POLL_TRANSPORT_GRACE_SECONDS
+
+    fun callTimeoutSeconds(requestedSeconds: Int): Int = requestedSeconds.coerceIn(
+        NetworkTimeoutDefaults.MIN_REQUEST_SECONDS,
+        NetworkTimeoutDefaults.MAX_REQUEST_SECONDS + POLL_SERVER_WAIT_SECONDS + POLL_TRANSPORT_GRACE_SECONDS,
+    )
 }

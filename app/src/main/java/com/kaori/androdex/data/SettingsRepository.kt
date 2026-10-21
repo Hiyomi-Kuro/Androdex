@@ -6,30 +6,41 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.util.UUID
 
-class SettingsRepository(context: Context) {
-    private val preferences: SharedPreferences = context.getSharedPreferences("androdex_settings", Context.MODE_PRIVATE)
+class SettingsRepository(context: Context, preferenceFileName: String = "androdex_settings") {
+    private val preferences: SharedPreferences = context.getSharedPreferences(preferenceFileName, Context.MODE_PRIVATE)
     private val gson = Gson()
 
     @Synchronized
     fun settings(): UserSettings = UserSettings(
         pluginName = preferences.getString(KEY_PLUGIN_NAME, "Androdex") ?: "Androdex",
         tunnelId = preferences.getString(KEY_TUNNEL_ID, "") ?: "",
-        networkTimeoutSeconds = preferences.getInt(KEY_NETWORK_TIMEOUT, 30).coerceIn(10, 120),
+        networkTimeoutSeconds = preferences.getInt(KEY_NETWORK_TIMEOUT, NetworkTimeoutDefaults.REQUEST_SECONDS)
+            .coerceIn(NetworkTimeoutDefaults.MIN_REQUEST_SECONDS, NetworkTimeoutDefaults.MAX_REQUEST_SECONDS),
         autoReconnect = preferences.getBoolean(KEY_AUTO_RECONNECT, true),
-        maxReadBytes = preferences.getLong(KEY_MAX_READ_BYTES, 5L * 1024 * 1024).coerceIn(256 * 1024L, 16 * 1024 * 1024L),
-        maxOutputChars = preferences.getInt(KEY_MAX_OUTPUT_CHARS, 65_536).coerceIn(4_096, 262_144),
+        maxReadBytes = preferences.getLong(KEY_MAX_READ_BYTES, 64L * 1024 * 1024).coerceIn(256 * 1024L, 64 * 1024 * 1024L),
+        maxReadChars = preferences.getInt(KEY_MAX_READ_CHARS, 10_000_000).coerceIn(100_000, 20_000_000),
+        maxOutputChars = preferences.getInt(KEY_MAX_OUTPUT_CHARS, 262_144).coerceIn(4_096, 262_144),
         debugLogging = preferences.getBoolean(KEY_DEBUG, false),
         autoStart = preferences.getBoolean(KEY_AUTO_START, false),
     )
+
+    @Synchronized
+    fun themeMode(): ThemeMode = ThemeMode.fromStoredValue(preferences.getString(KEY_THEME_MODE, ThemeMode.SYSTEM.name))
+
+    @Synchronized
+    fun saveThemeMode(value: ThemeMode) {
+        preferences.edit().putString(KEY_THEME_MODE, value.name).apply()
+    }
 
     @Synchronized
     fun saveSettings(value: UserSettings) {
         preferences.edit()
             .putString(KEY_PLUGIN_NAME, value.pluginName.trim().take(48).ifBlank { "Androdex" })
             .putString(KEY_TUNNEL_ID, value.tunnelId.trim())
-            .putInt(KEY_NETWORK_TIMEOUT, value.networkTimeoutSeconds.coerceIn(10, 120))
+            .putInt(KEY_NETWORK_TIMEOUT, value.networkTimeoutSeconds.coerceIn(NetworkTimeoutDefaults.MIN_REQUEST_SECONDS, NetworkTimeoutDefaults.MAX_REQUEST_SECONDS))
             .putBoolean(KEY_AUTO_RECONNECT, value.autoReconnect)
-            .putLong(KEY_MAX_READ_BYTES, value.maxReadBytes.coerceIn(256 * 1024L, 16 * 1024 * 1024L))
+            .putLong(KEY_MAX_READ_BYTES, value.maxReadBytes.coerceIn(256 * 1024L, 64 * 1024 * 1024L))
+            .putInt(KEY_MAX_READ_CHARS, value.maxReadChars.coerceIn(100_000, 20_000_000))
             .putInt(KEY_MAX_OUTPUT_CHARS, value.maxOutputChars.coerceIn(4_096, 262_144))
             .putBoolean(KEY_DEBUG, value.debugLogging)
             .putBoolean(KEY_AUTO_START, value.autoStart)
@@ -98,7 +109,9 @@ class SettingsRepository(context: Context) {
         const val KEY_NETWORK_TIMEOUT = "network_timeout"
         const val KEY_AUTO_RECONNECT = "auto_reconnect"
         const val KEY_MAX_READ_BYTES = "max_read_bytes"
+        const val KEY_MAX_READ_CHARS = "max_read_chars"
         const val KEY_MAX_OUTPUT_CHARS = "max_output_chars"
+        const val KEY_THEME_MODE = "theme_mode"
         const val KEY_DEBUG = "debug_logging"
         const val KEY_AUTO_START = "auto_start"
         const val KEY_ROOTS = "authorized_roots"

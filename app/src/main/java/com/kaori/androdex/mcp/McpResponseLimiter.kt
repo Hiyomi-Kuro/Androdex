@@ -39,8 +39,13 @@ class McpResponseLimiter(private val maxOutputChars: () -> Int) {
             }
             "read_text" -> {
                 copy("root_id"); copy("path")
-                result.addProperty("start_line", input.get("start_line")?.asInt ?: 1)
-                result.addProperty("line_count", smaller(input.get("line_count")?.asInt ?: 200, 100))
+                if (input.has("offset")) {
+                    result.addProperty("offset", input.get("offset")?.asLong ?: 0L)
+                    result.addProperty("limit", smaller(input.get("limit")?.asInt ?: outputLimit / 2, outputLimit / 2))
+                } else {
+                    result.addProperty("start_line", input.get("start_line")?.asInt ?: 1)
+                    result.addProperty("line_count", smaller(input.get("line_count")?.asInt ?: 200, 100))
+                }
                 result.addProperty("max_chars", minOf(input.get("max_chars")?.asInt ?: outputLimit / 2, outputLimit / 2).coerceAtLeast(1))
             }
             "read_document" -> {

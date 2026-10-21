@@ -10,14 +10,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.activity.viewModels
 import androidx.compose.material.icons.Icons
@@ -27,7 +25,13 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,11 +42,17 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.kaori.androdex.data.TunnelConnectionState
+import com.kaori.androdex.data.ThemeMode
+import com.kaori.androdex.data.isDark
 import com.kaori.androdex.ui.screens.FileManagerScreen
 import com.kaori.androdex.ui.screens.HomeScreen
 import com.kaori.androdex.ui.screens.LogsScreen
@@ -61,7 +71,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { AndrodexTheme { AndrodexApp(viewModel) } }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        setContent {
+            val state by viewModel.state.collectAsStateWithLifecycle()
+            val darkTheme = state.themeMode.isDark(androidx.compose.foundation.isSystemInDarkTheme())
+            SideEffect {
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+            AndrodexTheme(state.themeMode) { AndrodexApp(viewModel, state) }
+        }
     }
 
     override fun onResume() {
@@ -76,10 +103,10 @@ private enum class Page(val title: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AndrodexApp(viewModel: MainViewModel) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+private fun AndrodexApp(viewModel: MainViewModel, state: com.kaori.androdex.viewmodel.MainUiState) {
     val context = LocalContext.current
     var page by remember { mutableStateOf(Page.HOME) }
+    var themeMenuExpanded by remember { mutableStateOf(false) }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         viewModel.addSafFolder(uri)
     }
@@ -88,7 +115,12 @@ private fun AndrodexApp(viewModel: MainViewModel) {
         else viewModel.showMessage("Android 13 及以上需要允许通知，Androdex 才能以可见前台服务运行。")
     }
 
-    BackHandler(enabled = page != Page.HOME) {
+    BackHandler(enabled = page == Page.FILES && state.browserPath.isNotBlank()) {
+        val parent = state.browserPath.substringBeforeLast('/', "")
+        state.browserRootId?.let { viewModel.browse(it, parent) }
+    }
+
+    BackHandler(enabled = page != Page.HOME && !(page == Page.FILES && state.browserPath.isNotBlank())) {
         page = when (page) {
             Page.SETTINGS -> Page.HOME
             Page.FILES -> Page.HOME
@@ -99,8 +131,10 @@ private fun AndrodexApp(viewModel: MainViewModel) {
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 title = {
                     Text(
                         if (page == Page.HOME) "Androdex" else page.title,
@@ -108,11 +142,43 @@ private fun AndrodexApp(viewModel: MainViewModel) {
                     )
                 },
                 navigationIcon = {
-                    if (page != Page.HOME) IconButton(onClick = { page = Page.HOME }) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "返回首页")
+                    if (page != Page.HOME) IconButton(onClick = {
+                        if (page == Page.FILES && state.browserPath.isNotBlank()) {
+                            val parent = state.browserPath.substringBeforeLast('/', "")
+                            state.browserRootId?.let { viewModel.browse(it, parent) }
+                        } else page = Page.HOME
+                    }) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
+                    IconButton(onClick = { themeMenuExpanded = true }) {
+                        val themeIcon = when (state.themeMode) {
+                            ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+                            ThemeMode.LIGHT -> Icons.Filled.LightMode
+                            ThemeMode.DARK -> Icons.Filled.DarkMode
+                        }
+                        Icon(themeIcon, contentDescription = "主题：${state.themeMode.title()}")
+                    }
+                    DropdownMenu(expanded = themeMenuExpanded, onDismissRequest = { themeMenuExpanded = false }) {
+                        ThemeMode.entries.forEach { mode ->
+                            DropdownMenuItem(
+                                text = { Text(mode.title()) },
+                                leadingIcon = {
+                                    Icon(
+                                        when (mode) {
+                                            ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+                                            ThemeMode.LIGHT -> Icons.Filled.LightMode
+                                            ThemeMode.DARK -> Icons.Filled.DarkMode
+                                        },
+                                        contentDescription = null,
+                                    )
+                                },
+                                trailingIcon = { if (state.themeMode == mode) Icon(Icons.Filled.Check, contentDescription = "当前主题") },
+                                onClick = { viewModel.setThemeMode(mode); themeMenuExpanded = false },
+                            )
+                        }
+                    }
                     if (page != Page.SETTINGS) IconButton(onClick = { page = Page.SETTINGS }) {
                         Icon(Icons.Filled.Settings, contentDescription = "打开设置")
                     }
@@ -150,9 +216,6 @@ private fun AndrodexApp(viewModel: MainViewModel) {
                 },
                 onStop = viewModel::stopService,
                 onTest = viewModel::testConfiguration,
-                onSettings = { page = Page.SETTINGS },
-                onFolders = { page = Page.FOLDERS },
-                onLogs = { page = Page.LOGS },
             )
             Page.FOLDERS -> PermissionsScreen(
                 state = state,
@@ -168,6 +231,7 @@ private fun AndrodexApp(viewModel: MainViewModel) {
                 state = state,
                 contentPadding = padding,
                 onBrowse = viewModel::browse,
+                onCopyLocation = viewModel::copyLocation,
                 onPreview = { rootId, path, document -> viewModel.preview(rootId, path, document) },
                 onClosePreview = viewModel::closePreview,
             )
@@ -184,4 +248,10 @@ private fun AndrodexApp(viewModel: MainViewModel) {
             confirmButton = { TextButton(onClick = viewModel::clearMessage) { Text("知道了") } },
         )
     }
+}
+
+private fun ThemeMode.title(): String = when (this) {
+    ThemeMode.SYSTEM -> "跟随系统"
+    ThemeMode.LIGHT -> "浅色模式"
+    ThemeMode.DARK -> "深色模式"
 }

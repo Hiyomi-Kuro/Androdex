@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.Settings
 import com.kaori.androdex.data.AuthorizedRoot
 import com.kaori.androdex.data.RootKind
@@ -20,6 +21,20 @@ class PermissionManager(private val context: Context, private val settings: Sett
 
     fun hasNotificationPermission(): Boolean = Build.VERSION.SDK_INT < 33 ||
         context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    fun isIgnoringBatteryOptimizations(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+        (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
+
+    fun requestBatteryOptimizationExemptionIntent(): Intent =
+        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
+
+    fun batteryOptimizationSettingsIntent(): Intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+
+    fun appDetailsSettingsIntent(): Intent =
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+
+    fun appNotificationSettingsIntent(): Intent =
+        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
 
     fun openAllFilesSettingsIntent(): Intent {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

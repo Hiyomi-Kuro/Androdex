@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -14,17 +13,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -32,7 +27,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kaori.androdex.data.TunnelConnectionState
@@ -48,24 +44,12 @@ fun HomeScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onTest: () -> Unit,
-    onSettings: () -> Unit,
-    onFolders: () -> Unit,
-    onLogs: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = contentPadding.calculateTopPadding() + 12.dp, bottom = contentPadding.calculateBottomPadding() + 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        item {
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Androdex", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text("只读访问你明确授权的 Android 文件夹", style = MaterialTheme.typography.bodyLarge)
-                    Text("MCP 工具只在 ChatGPT 发起请求时读取文件。", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
         item {
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -115,17 +99,6 @@ fun HomeScreen(
                         Text("测试连接", modifier = Modifier.padding(start = 6.dp))
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    FilledTonalButton(onClick = onFolders, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Filled.FolderOpen, contentDescription = null)
-                        Text("管理文件夹", modifier = Modifier.padding(start = 6.dp))
-                    }
-                    OutlinedButton(onClick = onSettings, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Filled.Settings, contentDescription = null)
-                        Text("打开设置", modifier = Modifier.padding(start = 6.dp))
-                    }
-                }
-                OutlinedButton(onClick = onLogs, modifier = Modifier.fillMaxWidth()) { Text("查看运行日志") }
             }
         }
         if (state.roots.any { !it.accessible }) {
@@ -146,8 +119,21 @@ fun HomeScreen(
 @Composable
 private fun StatusLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 12.dp))
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(0.42f),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
+            softWrap = true,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.weight(0.58f).padding(start = 8.dp),
+        )
     }
 }
 

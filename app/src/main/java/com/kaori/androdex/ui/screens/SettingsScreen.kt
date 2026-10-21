@@ -1,5 +1,6 @@
 package com.kaori.androdex.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -21,6 +22,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kaori.androdex.viewmodel.MainUiState
 import com.kaori.androdex.viewmodel.MainViewModel
+import com.kaori.androdex.data.ThemeMode
 
 @Composable
 fun SettingsScreen(state: MainUiState, contentPadding: PaddingValues, viewModel: MainViewModel) {
@@ -123,8 +126,9 @@ fun SettingsScreen(state: MainUiState, contentPadding: PaddingValues, viewModel:
                     Switch(checked = settings.autoReconnect, onCheckedChange = { settings = settings.copy(autoReconnect = it) })
                 }
                 NumberField("网络请求超时（秒）", settings.networkTimeoutSeconds.toString(), 10, 120) { settings = settings.copy(networkTimeoutSeconds = it) }
-                NumberField("单文件读取上限（MiB）", (settings.maxReadBytes / (1024 * 1024)).toString(), 1, 16) { settings = settings.copy(maxReadBytes = it * 1024L * 1024) }
+                NumberField("单文件累计读取字符上限", settings.maxReadChars.toString(), 100_000, 20_000_000) { settings = settings.copy(maxReadChars = it) }
                 NumberField("单次工具输出字符上限", settings.maxOutputChars.toString(), 4_096, 262_144) { settings = settings.copy(maxOutputChars = it) }
+                Text("大文件支持按字符偏移连续分块读取。单次工具输出上限只限制一页响应，不限制整份文件。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("详细调试日志", fontWeight = FontWeight.Medium)
@@ -132,6 +136,48 @@ fun SettingsScreen(state: MainUiState, contentPadding: PaddingValues, viewModel:
                     }
                     Switch(checked = settings.debugLogging, onCheckedChange = { settings = settings.copy(debugLogging = it) })
                 }
+            }
+        }
+        Card {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("主题模式", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                ThemeMode.entries.forEach { mode ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = state.themeMode == mode,
+                            onClick = { viewModel.setThemeMode(mode) },
+                        )
+                        Text(
+                            text = mode.title(),
+                            modifier = Modifier.fillMaxWidth().clickable { viewModel.setThemeMode(mode) },
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+            }
+        }
+        Card {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("后台运行与电池优化", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("前台服务：${if (state.serviceActive) "运行中" else "已停止"}", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "电池优化：${if (state.batteryOptimizationAllowed) "已允许后台运行" else "受电池优化限制"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (state.batteryOptimizationAllowed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                )
+                Text("通知权限：${if (state.notificationsAllowed) "已允许" else "未允许"}", style = MaterialTheme.typography.bodyMedium)
+                Text("电池优化豁免不能保证 Android 系统永不停止应用。部分厂商另有自启动、后台高耗电或电池无限制选项，可在系统设置 → 应用 → Androdex → 电池/后台管理中手动开启。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(
+                    onClick = viewModel::requestBatteryOptimizationExemption,
+                    enabled = !state.batteryOptimizationAllowed,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (state.batteryOptimizationAllowed) "已允许后台高耗电运行" else "允许后台高耗电运行") }
+                OutlinedButton(onClick = viewModel::openBatteryOptimizationSettings, modifier = Modifier.fillMaxWidth()) { Text("打开系统电池优化设置") }
+                OutlinedButton(onClick = viewModel::openAppBatterySettings, modifier = Modifier.fillMaxWidth()) { Text("打开应用后台电池设置") }
+                OutlinedButton(onClick = viewModel::openAppNotificationSettings, modifier = Modifier.fillMaxWidth()) { Text("打开应用通知设置") }
             }
         }
         Card {
@@ -157,16 +203,30 @@ private fun NumberField(label: String, value: String, minimum: Int, maximum: Int
     androidx.compose.runtime.LaunchedEffect(value) {
         if (text.toIntOrNull() != value.toIntOrNull()) text = value
     }
+    val parsed = text.toIntOrNull()
+    val invalid = parsed == null || parsed !in minimum..maximum
     OutlinedTextField(
         value = text,
         onValueChange = { raw ->
-            text = raw.filter(Char::isDigit).take(6)
+            text = raw.take(10)
             text.toIntOrNull()?.takeIf { it in minimum..maximum }?.let(onValue)
         },
         modifier = Modifier.fillMaxWidth(),
         label = { Text(label) },
         singleLine = true,
+        isError = invalid,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        supportingText = { Text("范围：$minimum–$maximum") },
+        supportingText = {
+            Text(
+                if (invalid) "请输入 $minimum–$maximum 之间的正整数" else "范围：$minimum–$maximum",
+                color = if (invalid) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
     )
+}
+
+private fun ThemeMode.title(): String = when (this) {
+    ThemeMode.SYSTEM -> "跟随系统"
+    ThemeMode.LIGHT -> "浅色模式"
+    ThemeMode.DARK -> "深色模式"
 }
