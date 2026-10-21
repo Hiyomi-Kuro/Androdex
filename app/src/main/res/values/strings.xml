@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Androdex</string>
+    <string name="tunnel_service_description">用户手动开启的 Androdex MCP 安全隧道服务</string>
+</resources>
